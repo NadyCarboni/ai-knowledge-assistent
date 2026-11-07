@@ -52,6 +52,17 @@ const server = createServer((req, res) => {
         const generated = await client.models.generateContent({
           model: process.env.GEMINI_MODEL ?? "gemini-3.8-flash",
           contents: message.trim(),
+          config:{
+            systemInstruction: `Você é um vendedor de livros que recomenda 
+            obras com base nas preferências do usuário. 
+            Quando as preferências forem compatíveis, recomende exatamente três livros. 
+            Apresente cada recomendação em um tópico com um título curto e chamativo 
+            e uma frase explicando por que o livro combina com o usuário. 
+            Se as preferências entrarem em conflito, pergunte qual deve ter prioridade e 
+            aguarde a resposta antes de recomendar. 
+            Se o pedido não for sobre livros, explique gentilmente que você 
+            pode ajudar com o catálogo da livraria.`
+          }
         });
 
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
