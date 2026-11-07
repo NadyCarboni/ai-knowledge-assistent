@@ -1,4 +1,15 @@
+import { configDotenv } from "dotenv";
 import { createServer } from "node:http";
+import { GoogleGenAI } from "@google/genai";
+
+configDotenv();
+
+const apiKey = process.env.GEMINI_API_KEY;
+if (!apiKey) {
+  throw new Error("GEMINI_API_KEY não está configurada.");
+}
+
+const client = new GoogleGenAI({ apiKey });
 
 const server = createServer((req, res) => {
   if (req.method === "GET" && req.url === "/health") {
@@ -7,46 +18,49 @@ const server = createServer((req, res) => {
     return;
   }
 
-if (req.method === "POST" && req.url === "/chat") {
+  if (req.method === "POST" && req.url === "/chat") {
     const chunks: Buffer[] = [];
 
     req.on("data", (chunk) => {
-        chunks.push(chunk);
+      chunks.push(chunk);
     });
 
-   req.on("end", () => {
-        const body = Buffer.concat(chunks).toString("utf-8");
+    req.on("end", async () => {
+      const body = Buffer.concat(chunks).toString("utf-8");
+      let parsedBody: unknown;
 
-        try {
-            const parsedBody = JSON.parse(body);
+      try {
+        parsedBody = JSON.parse(body);
+      } catch {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "Invalid JSON" }));
+        return;
+      }
 
-            const message = parsedBody?.message;
+      const message =
+        typeof parsedBody === "object" && parsedBody !== null && "message" in parsedBody
+          ? parsedBody.message
+          : undefined;
 
-            if(typeof message !== "string" || message.trim() === "") {
-                res.writeHead(400, {
-                    "Content-Type": "application/json; charset=utf-8"
-                }); 
-                res.end(JSON.stringify({ error: "message must be a non-empty string" }));
-                return;
-            }
+      if (typeof message !== "string" || message.trim() === "") {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "message must be a non-empty string" }));
+        return;
+      }
 
-            console.log(parsedBody);
+      try {
+        const generated = await client.models.generateContent({
+          model: process.env.GEMINI_MODEL ?? "gemini-3.8-flash",
+          contents: message.trim(),
+        });
 
-            res.writeHead(200, {
-                "Content-Type": "application/json; charset=utf-8"
-            });
-
-            res.end(JSON.stringify({ status: "ok" }));
-
-        } catch (error) {
-            res.writeHead(400, {
-                "Content-Type": "application/json; charset=utf-8"
-            });
-
-            res.end(JSON.stringify({
-                error: "Invalid JSON"
-            }));
-        }
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ reply: generated.text ?? "" }));
+      } catch (error) {
+        console.error("Gemini request failed:", error);
+        res.writeHead(502, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "Could not generate a response" }));
+      }
     });
 
     return;
