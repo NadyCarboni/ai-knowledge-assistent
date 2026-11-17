@@ -6,96 +6,100 @@ configDotenv();
 
 const apiKey = process.env.GEMINI_API_KEY;
 if (!apiKey) {
-  throw new Error("GEMINI_API_KEY não está configurada.");
+    throw new Error("GEMINI_API_KEY não está configurada.");
 }
 
 const client = new GoogleGenAI({
     apiKey,
     httpOptions: {
-        timeout: 30_000,
+        timeout: 120_000,
         retryOptions: { attempts: 2 },
     },
 });
 
 const sessions = new Map<string, Content[]>();
+const HISTORY_LIMIT = 10;
 
 const server = createServer((req, res) => {
-  if (req.method === "GET" && req.url === "/health") {
-    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify({ status: "ok" }));
-    return;
-  }
-
-  if (req.method === "POST" && req.url === "/chat") {
-    const chunks: Buffer[] = [];
-
-    req.on("data", (chunk) => {
-      chunks.push(chunk);
-    });
-
-    req.on("end", async () => {
-      const body = Buffer.concat(chunks).toString("utf-8");
-      let parsedBody: unknown;
-
-      try {
-        parsedBody = JSON.parse(body);
-      } catch {
-        res.writeHead(400, {
-          "Content-Type": "application/json; charset=utf-8",
-        });
-        res.end(JSON.stringify({ error: "Invalid JSON" }));
+    if (req.method === "GET" && req.url === "/health") {
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ status: "ok" }));
         return;
-      }
+    }
 
-      const message =
-        typeof parsedBody === "object" &&
-        parsedBody !== null &&
-        "message" in parsedBody
-          ? parsedBody.message
-          : undefined;
+    if (req.method === "POST" && req.url === "/chat") {
+        const chunks: Buffer[] = [];
 
-      const sessionId =
-        typeof parsedBody === "object" &&
-        parsedBody !== null &&
-        "sessionId" in parsedBody
-          ? parsedBody.sessionId
-          : undefined;
-
-      if (typeof message !== "string" || message.trim() === "") {
-        res.writeHead(400, {
-          "Content-Type": "application/json; charset=utf-8",
+        req.on("data", (chunk) => {
+            chunks.push(chunk);
         });
-        res.end(
-          JSON.stringify({ error: "message must be a non-empty string" }),
-        );
-        return;
-      }
 
-      if (typeof sessionId !== "string" || sessionId.trim() === "") {
-        res.writeHead(400, {
-          "Content-Type": "application/json; charset=utf-8",
-        });
-        res.end(
-          JSON.stringify({ error: "sessionId must be a non-empty string" }),
-        );
-        return;
-      }
+        req.on("end", async () => {
+            const body = Buffer.concat(chunks).toString("utf-8");
+            let parsedBody: unknown;
 
-      let history = sessions.get(sessionId);
+            try {
+                parsedBody = JSON.parse(body);
+            } catch {
+                res.writeHead(400, {
+                    "Content-Type": "application/json; charset=utf-8",
+                });
+                res.end(JSON.stringify({ error: "Invalid JSON" }));
+                return;
+            }
 
-      if (history === undefined) {
-        history = [];
-        sessions.set(sessionId, history);
-      }
+            const message =
+                typeof parsedBody === "object" &&
+                    parsedBody !== null &&
+                    "message" in parsedBody
+                    ? parsedBody.message
+                    : undefined;
 
-      history.push({ role: "user", parts: [{ text: message.trim() }] });
-      console.log(JSON.stringify(history, null, 2));
-      try {
-        const stream = await client.models.generateContentStream({
-          model: process.env.GEMINI_MODEL ?? "gemini-3.8-flash",
-          contents: message.trim(),
-          config: {
-            systemInstruction: `Você é um vendedor de livros que recomenda 
+            const sessionId =
+                typeof parsedBody === "object" &&
+                    parsedBody !== null &&
+                    "sessionId" in parsedBody
+                    ? parsedBody.sessionId
+                    : undefined;
+
+            if (typeof message !== "string" || message.trim() === "") {
+                res.writeHead(400, {
+                    "Content-Type": "application/json; charset=utf-8",
+                });
+                res.end(
+                    JSON.stringify({ error: "message must be a non-empty string" }),
+                );
+                return;
+            }
+
+            if (typeof sessionId !== "string" || sessionId.trim() === "") {
+                res.writeHead(400, {
+                    "Content-Type": "application/json; charset=utf-8",
+                });
+                res.end(
+                    JSON.stringify({ error: "sessionId must be a non-empty string" }),
+                );
+                return;
+            }
+
+            let history = sessions.get(sessionId);
+
+            if (history && history.length > HISTORY_LIMIT) {
+                history.splice(0, history.length - HISTORY_LIMIT);
+            }
+
+            if (history === undefined) {
+                history = [];
+                sessions.set(sessionId, history);
+            }
+
+            history.push({ role: "user", parts: [{ text: message.trim() }] });
+            try {
+                const stream = await client.models.generateContentStream({
+                    model: process.env.GEMINI_MODEL ?? "gemini-3.8-flash",
+                    contents: history,
+                    config: {
+                        systemInstruction: `Você é um vendedor de livros que recomenda 
             obras com base nas preferências do usuário. 
             Quando as preferências forem compatíveis, recomende exatamente três livros. 
             Apresente cada recomendação em um tópico com um título curto e chamativo 
@@ -104,47 +108,62 @@ const server = createServer((req, res) => {
             aguarde a resposta antes de recomendar. 
             Se o pedido não for sobre livros, explique gentilmente que você 
             pode ajudar com o catálogo da livraria.`,
-          },
+                    },
+                });
+
+                res.writeHead(200, {
+                    "Content-Type": "text/event-stream; charset=utf-8",
+                    "Cache-Control": "no-cache",
+                    Connection: "keep-alive",
+                });
+
+
+                let assistantReply = "";
+                for await (const chunk of stream) {
+                    if (chunk.text) {
+                        assistantReply += chunk.text;
+                        res.write(`data: ${JSON.stringify({ text: chunk.text })}\n\n`);
+                    }
+                }
+
+                history.push({
+                    role: "model",
+                    parts: [{ text: assistantReply }],
+                });
+
+                res.end();
+            } catch (error) {
+                console.error("Gemini request failed:", error);
+
+                const lastMessage = history[history.length - 1];
+
+                if (lastMessage?.role === "user") {
+                    history.pop();
+                }
+                
+                if (res.headersSent) {
+                    res.write(
+                        `event: error\ndata: ${JSON.stringify({ message: "Could not generate a response" })}\n\n`,
+                    );
+                    res.end();
+                    return;
+                }
+                res.writeHead(502, {
+                    "Content-Type": "application/json; charset=utf-8",
+                });
+                res.end(JSON.stringify({ error: "Could not generate a response" }));
+            }
         });
 
-        res.writeHead(200, {
-          "Content-Type": "text/event-stream; charset=utf-8",
-          "Cache-Control": "no-cache",
-          Connection: "keep-alive",
-        });
+        return;
+    }
 
-        for await (const chunk of stream) {
-          if (chunk.text) {
-            res.write(`data: ${JSON.stringify({ text: chunk.text })}\n\n`);
-          }
-        }
-
-        res.end();
-      } catch (error) {
-        console.error("Gemini request failed:", error);
-        if (res.headersSent) {
-          res.write(
-            `event: error\ndata: ${JSON.stringify({ message: "Could not generate a response" })}\n\n`,
-          );
-          res.end();
-          return;
-        }
-        res.writeHead(502, {
-          "Content-Type": "application/json; charset=utf-8",
-        });
-        res.end(JSON.stringify({ error: "Could not generate a response" }));
-      }
-    });
-
-    return;
-  }
-
-  res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
-  res.end(JSON.stringify({ status: "not found" }));
+    res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ status: "not found" }));
 });
 
 const PORT = 3001;
 
 server.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`Server running on http://localhost:${PORT}`);
 });
