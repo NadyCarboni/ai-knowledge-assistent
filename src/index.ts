@@ -18,7 +18,17 @@ const client = new GoogleGenAI({
 });
 
 const sessions = new Map<string, Content[]>();
-const HISTORY_LIMIT = 10;
+const MAX_INPUT_TOKENS = 8_000;
+const SYSTEM_INSTRUCTION = `Você é um vendedor de livros que recomenda 
+            obras com base nas preferências do usuário. 
+            Quando as preferências forem compatíveis, recomende exatamente três livros. 
+            Apresente cada recomendação em um tópico com um título curto e chamativo 
+            e uma frase explicando por que o livro combina com o usuário. 
+            Se as preferências entrarem em conflito, pergunte qual deve ter prioridade e 
+            aguarde a resposta antes de recomendar. 
+            Se o pedido não for sobre livros, explique gentilmente que você 
+            pode ajudar com o catálogo da livraria.`;
+const model = process.env.GEMINI_MODEL ?? "gemini-3.8-flash";
 
 const server = createServer((req, res) => {
     if (req.method === "GET" && req.url === "/health") {
@@ -84,30 +94,52 @@ const server = createServer((req, res) => {
 
             let history = sessions.get(sessionId);
 
-            if (history && history.length > HISTORY_LIMIT) {
-                history.splice(0, history.length - HISTORY_LIMIT);
-            }
-
             if (history === undefined) {
                 history = [];
                 sessions.set(sessionId, history);
             }
 
             history.push({ role: "user", parts: [{ text: message.trim() }] });
+
             try {
+
+                const tokenCount = await client.models.countTokens({
+                    model,
+                    contents: history,
+                });
+
+                let totalTokens = tokenCount.totalTokens ?? 0;
+
+                while (totalTokens > MAX_INPUT_TOKENS && history.length > 1) {
+                    history.splice(0, 2);
+
+                    const updatedTokenCount = await client.models.countTokens({
+                        model,
+                        contents: history,
+                    });
+
+                    totalTokens = updatedTokenCount.totalTokens ?? 0;
+                }
+
+
+                if (totalTokens > MAX_INPUT_TOKENS) {
+                    history.pop();
+
+                    res.writeHead(413, {
+                        "Content-Type": "application/json; charset=utf-8",
+                    });
+
+                    res.end(JSON.stringify({ error: "Content too large" }));
+                    return;
+                }
+
+                console.log(`Context tokens: ${totalTokens}`);
+
                 const stream = await client.models.generateContentStream({
-                    model: process.env.GEMINI_MODEL ?? "gemini-3.8-flash",
+                    model,
                     contents: history,
                     config: {
-                        systemInstruction: `Você é um vendedor de livros que recomenda 
-            obras com base nas preferências do usuário. 
-            Quando as preferências forem compatíveis, recomende exatamente três livros. 
-            Apresente cada recomendação em um tópico com um título curto e chamativo 
-            e uma frase explicando por que o livro combina com o usuário. 
-            Se as preferências entrarem em conflito, pergunte qual deve ter prioridade e 
-            aguarde a resposta antes de recomendar. 
-            Se o pedido não for sobre livros, explique gentilmente que você 
-            pode ajudar com o catálogo da livraria.`,
+                        systemInstruction: SYSTEM_INSTRUCTION,
                     },
                 });
 
@@ -140,7 +172,7 @@ const server = createServer((req, res) => {
                 if (lastMessage?.role === "user") {
                     history.pop();
                 }
-                
+
                 if (res.headersSent) {
                     res.write(
                         `event: error\ndata: ${JSON.stringify({ message: "Could not generate a response" })}\n\n`,
