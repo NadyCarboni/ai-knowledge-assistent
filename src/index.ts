@@ -1,6 +1,7 @@
 import { configDotenv } from "dotenv";
 import { createServer } from "node:http";
 import { GoogleGenAI, type Content } from "@google/genai";
+import { chatResponseJsonSchema, chatResponseSchema } from "./schemas/chat-response.js";
 
 configDotenv();
 
@@ -140,6 +141,8 @@ const server = createServer((req, res) => {
                     contents: history,
                     config: {
                         systemInstruction: SYSTEM_INSTRUCTION,
+                        responseMimeType: "application/json",
+                        responseJsonSchema: chatResponseJsonSchema,
                     },
                 });
 
@@ -158,9 +161,11 @@ const server = createServer((req, res) => {
                     }
                 }
 
+                const parsedResponse = chatResponseSchema.parse(JSON.parse(assistantReply));
+
                 history.push({
                     role: "model",
-                    parts: [{ text: assistantReply }],
+                    parts: [{ text: JSON.stringify(parsedResponse) }],
                 });
 
                 res.end();
